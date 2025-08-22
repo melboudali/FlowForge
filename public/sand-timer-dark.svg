@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="12" fill="#0a0a0a"/>
+  <!-- frame bars -->
+  <rect x="16" y="10" width="32" height="4" rx="2" fill="#ffffff"/>
+  <rect x="16" y="50" width="32" height="4" rx="2" fill="#ffffff"/>
+  <!-- hourglass outline -->
+  <path d="M20 14h24c0 8-8 12-12 18 4 6 12 10 12 18H20c0-8 8-12 12-18-4-6-12-10-12-18Z"
+        fill="none" stroke="#ffffff" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- sand (top small, bottom pile) -->
+  <path d="M22 20h20l-10 10Z" fill="#fbbf24"/>
+  <path d="M24 44h16l-8-8Z" fill="#fbbf24"/>
+  <!-- pinch dot -->
+  <circle cx="32" cy="32" r="2" fill="#fbbf24"/>
+</svg>

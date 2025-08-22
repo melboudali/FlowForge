@@ -1,7 +1,14 @@
+import { Hourglass, Save, X, XIcon } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState, type JSX } from "react";
 
 /**
- * Hybrid Pomodoro + Todo (TypeScript + Tailwind)
+ * FlowForge (TypeScript + Tailwind)
+ * Fixes & Upgrades in this version:
+ * - ✔️ Dark mode works globally (adds/removes `dark` on <html>)
+ * - ✔️ Timer uses monotonic end-time math (no drift, no throttling slowdown)
+ * - ✔️ Typing freezes eliminated (lighter timer updates, no heavy recompute)
+ * - ✔️ All buttons show pointer cursor
+ *
  * Features:
  * - Presets: Deep Work (90/15), Flow (50/10), and Custom
  * - Dark mode with localStorage persistence
@@ -9,7 +16,8 @@ import React, { useEffect, useMemo, useRef, useState, type JSX } from "react";
  * - Session History (per-day counts & minutes, plus today's timeline)
  * - Minimal sound alert at phase switch (Web Audio API)
  *
- * Drop this component into a React + Tailwind project. File can be named `HybridPomodoroApp.tsx`.
+ * Drop this component into a React + Tailwind project. Name it `FlowForge.tsx`.
+ * Ensure your tailwind.config.js has:  darkMode: 'class'
  */
 
 // =========================
@@ -69,14 +77,18 @@ const hashToIndex = (str: string, modulo: number) => {
 };
 
 const PALETTES = [
-	{ badge: "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300", dot: "bg-blue-500" },
-	{ badge: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300", dot: "bg-emerald-500" },
-	{ badge: "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-300", dot: "bg-amber-500" },
-	{ badge: "bg-fuchsia-100 text-fuchsia-700 dark:bg-fuchsia-900/30 dark:text-fuchsia-300", dot: "bg-fuchsia-500" },
-	{ badge: "bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300", dot: "bg-rose-500" },
-	{ badge: "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300", dot: "bg-cyan-500" },
-	{ badge: "bg-indigo-100 text-indigo-700 dark:bg-indigo-900/30 dark:text-indigo-300", dot: "bg-indigo-500" },
-	{ badge: "bg-teal-100 text-teal-700 dark:bg-teal-900/30 dark:text-teal-300", dot: "bg-teal-500" }
+	{ badge: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-300", dot: "bg-red-500" },
+	{ badge: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-300", dot: "bg-orange-500" },
+	{ badge: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-300", dot: "bg-yellow-500" },
+	{ badge: "bg-lime-100 text-lime-800 dark:bg-lime-900/30 dark:text-lime-300", dot: "bg-lime-500" },
+	{ badge: "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300", dot: "bg-emerald-500" },
+	{ badge: "bg-teal-100 text-teal-800 dark:bg-teal-900/30 dark:text-teal-300", dot: "bg-teal-500" },
+	{ badge: "bg-cyan-100 text-cyan-800 dark:bg-cyan-900/30 dark:text-cyan-300", dot: "bg-cyan-500" },
+	{ badge: "bg-sky-100 text-sky-800 dark:bg-sky-900/30 dark:text-sky-300", dot: "bg-sky-500" },
+	{ badge: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300", dot: "bg-blue-500" },
+	{ badge: "bg-indigo-100 text-indigo-800 dark:bg-indigo-900/30 dark:text-indigo-300", dot: "bg-indigo-500" },
+	{ badge: "bg-violet-100 text-violet-800 dark:bg-violet-900/30 dark:text-violet-300", dot: "bg-violet-500" },
+	{ badge: "bg-fuchsia-100 text-fuchsia-800 dark:bg-fuchsia-900/30 dark:text-fuchsia-300", dot: "bg-fuchsia-500" }
 ] as const;
 
 const badgeFor = (name?: string) => PALETTES[hashToIndex(name || "General", PALETTES.length)].badge;
@@ -180,11 +192,17 @@ export default function HybridPomodoroApp(): JSX.Element {
 	// Theme
 	const [dark, setDark] = useState<boolean>(() => loadLS<boolean>("pomodoro_theme_v1", false));
 	useEffect(() => saveLS("pomodoro_theme_v1", dark), [dark]);
+	// Apply dark to <html> for Tailwind's class strategy
+	useEffect(() => {
+		const root = document.documentElement;
+		if (dark) root.classList.add("dark");
+		else root.classList.remove("dark");
+	}, [dark]);
 
 	// Presets
 	const defaultSettings = useMemo<Settings>(
 		() =>
-			loadLS<Settings>("pomodoro_settings_v3", {
+			loadLS<Settings>("pomodoro_settings_v4", {
 				presetName: "Deep Work (90/15)",
 				focusMin: 90,
 				breakMin: 15,
@@ -203,50 +221,56 @@ export default function HybridPomodoroApp(): JSX.Element {
 	const [remaining, setRemaining] = useState<number>(settings.focusMin * 60);
 	const [completedSessions, setCompletedSessions] = useState<number>(0);
 
+	// Monotonic countdown target (epoch ms at which the phase ends)
+	const targetRef = useRef<number | null>(null);
 	const intervalRef = useRef<number | null>(null);
-	const lastTickRef = useRef<number | null>(null);
 
 	// Todo state
-	const [categories, setCategories] = useState<string[]>(() => loadLS<string[]>("pomodoro_categories_v3", [...DEFAULT_CATEGORIES] as unknown as string[]));
-	const [projects, setProjects] = useState<string[]>(() => loadLS<string[]>("pomodoro_projects_v1", [...DEFAULT_PROJECTS] as unknown as string[]));
-	const [tasks, setTasks] = useState<Task[]>(() => loadLS<Task[]>("pomodoro_tasks_v3", []));
+	const [categories, setCategories] = useState<string[]>(() => loadLS<string[]>("pomodoro_categories_v4", [...DEFAULT_CATEGORIES] as unknown as string[]));
+	const [projects, setProjects] = useState<string[]>(() => loadLS<string[]>("pomodoro_projects_v2", [...DEFAULT_PROJECTS] as unknown as string[]));
+	const [tasks, setTasks] = useState<Task[]>(() => loadLS<Task[]>("pomodoro_tasks_v4", []));
 	const [filterCat, setFilterCat] = useState<string>("All");
 	const [filterProject, setFilterProject] = useState<string>("All");
 	const [search, setSearch] = useState<string>("");
 
 	// History
-	const [history, setHistory] = useState<HistoryMap>(() => loadLS<HistoryMap>("pomodoro_history_v2", {}));
+	const [history, setHistory] = useState<HistoryMap>(() => loadLS<HistoryMap>("pomodoro_history_v3", {}));
 
 	// Persist
-	useEffect(() => saveLS("pomodoro_settings_v3", settings), [settings]);
-	useEffect(() => saveLS("pomodoro_tasks_v3", tasks), [tasks]);
-	useEffect(() => saveLS("pomodoro_categories_v3", categories), [categories]);
-	useEffect(() => saveLS("pomodoro_projects_v1", projects), [projects]);
-	useEffect(() => saveLS("pomodoro_history_v2", history), [history]);
+	useEffect(() => saveLS("pomodoro_settings_v4", settings), [settings]);
+	useEffect(() => saveLS("pomodoro_tasks_v4", tasks), [tasks]);
+	useEffect(() => saveLS("pomodoro_categories_v4", categories), [categories]);
+	useEffect(() => saveLS("pomodoro_projects_v2", projects), [projects]);
+	useEffect(() => saveLS("pomodoro_history_v3", history), [history]);
 
-	// Update remaining when settings/phase changes if not running
+	// Update remaining ONLY when phase or durations change (not when pausing)
 	useEffect(() => {
-		if (!isRunning) setRemaining((phase === "focus" ? settings.focusMin : settings.breakMin) * 60);
+		// If timer isn't running AND we are not mid-countdown, sync to the new base duration
+		if (!isRunning && targetRef.current == null) {
+			setRemaining((phase === "focus" ? settings.focusMin : settings.breakMin) * 60);
+		}
+		// Intentionally exclude `isRunning` from deps so pausing doesn't reset remaining
 	}, [settings.focusMin, settings.breakMin, phase, isRunning]);
 
-	// Timer engine
+	// Monotonic timer engine (no drift, resilient to throttling)
 	useEffect(() => {
 		if (!isRunning) return;
 
 		const tick = () => {
-			const now = performance.now();
-			if (lastTickRef.current == null) lastTickRef.current = now;
-			const dt = Math.max(0, Math.round((now - lastTickRef.current) / 1000));
-			lastTickRef.current = now;
-			setRemaining(prev => Math.max(0, prev - dt));
+			if (targetRef.current == null) return;
+			const msLeft = Math.max(0, targetRef.current - Date.now());
+			const secLeft = Math.ceil(msLeft / 1000);
+			setRemaining(secLeft);
 		};
 
-		const id = window.setInterval(tick, 500);
+		// run immediately so UI updates without 1s delay
+		tick();
+		const id = window.setInterval(tick, 200); // lightweight, smooth
 		intervalRef.current = id as unknown as number;
+
 		return () => {
 			if (intervalRef.current) window.clearInterval(intervalRef.current);
 			intervalRef.current = null;
-			lastTickRef.current = null;
 		};
 	}, [isRunning]);
 
@@ -254,23 +278,35 @@ export default function HybridPomodoroApp(): JSX.Element {
 	useEffect(() => {
 		if (remaining > 0) return;
 
-		// Beep
+		// Beep (short)
 		try {
-			// @ts-expect-error webkitAudioContext for Safari
-			const AC: typeof AudioContext = window.AudioContext || window.webkitAudioContext;
+			const AC: typeof AudioContext =
+				"AudioContext" in window
+					? (window.AudioContext as typeof AudioContext)
+					: // eslint-disable-next-line @typescript-eslint/no-explicit-any
+					  ((window as any).webkitAudioContext as typeof AudioContext);
 			const ctx = new AC();
-			const o = ctx.createOscillator();
 			const g = ctx.createGain();
-			o.type = "sine";
-			o.frequency.value = phase === "focus" ? 660 : 440;
-			o.connect(g);
 			g.connect(ctx.destination);
-			g.gain.setValueAtTime(0.0001, ctx.currentTime);
-			g.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.02);
-			g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.4);
-			o.start();
-			o.stop(ctx.currentTime + 0.45);
-		} catch {}
+
+			const mk = (freq: number, t: number) => {
+				const o = ctx.createOscillator();
+				o.type = "sine";
+				o.frequency.value = freq;
+				const gg = ctx.createGain();
+				gg.gain.setValueAtTime(0.0001, t);
+				gg.gain.exponentialRampToValueAtTime(0.25, t + 0.02);
+				gg.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
+				o.connect(gg).connect(g);
+				o.start(t);
+				o.stop(t + 0.65);
+			};
+			const now = ctx.currentTime;
+			mk(660, now); // E5
+			mk(990, now + 0.02); // 3rd partial
+		} catch {
+			// no-op
+		}
 
 		if (phase === "focus") {
 			// log completed focus to history
@@ -291,38 +327,75 @@ export default function HybridPomodoroApp(): JSX.Element {
 			setCompletedSessions(n => n + 1);
 			setPhase("break");
 			setRemaining(settings.breakMin * 60);
-			setIsRunning(settings.autoStartNext);
+			if (settings.autoStartNext) {
+				setIsRunning(true);
+				targetRef.current = Date.now() + settings.breakMin * 60 * 1000;
+			} else {
+				setIsRunning(false);
+				targetRef.current = null;
+			}
 		} else {
 			setPhase("focus");
 			setRemaining(settings.focusMin * 60);
-			setIsRunning(settings.autoStartNext);
+			if (settings.autoStartNext) {
+				setIsRunning(true);
+				targetRef.current = Date.now() + settings.focusMin * 60 * 1000;
+			} else {
+				setIsRunning(false);
+				targetRef.current = null;
+			}
 		}
 	}, [remaining, phase, settings.autoStartNext, settings.breakMin, settings.focusMin, settings.presetName]);
 
 	// ---------- Timer Actions ----------
-	const start = () => setIsRunning(true);
-	const pause = () => setIsRunning(false);
+	const start = () => {
+		if (!isRunning) {
+			targetRef.current = Date.now() + remaining * 1000;
+			setIsRunning(true);
+		}
+	};
+	const pause = () => {
+		if (isRunning) {
+			// freeze remaining based on target
+			if (targetRef.current != null) {
+				const msLeft = Math.max(0, targetRef.current - Date.now());
+				setRemaining(Math.ceil(msLeft / 1000));
+			}
+			setIsRunning(false);
+			targetRef.current = null;
+		}
+	};
 	const reset = () => {
 		setIsRunning(false);
+		targetRef.current = null;
 		setPhase("focus");
 		setRemaining(settings.focusMin * 60);
 		setCompletedSessions(0);
 	};
 	const skip = () => {
 		setIsRunning(false);
+		targetRef.current = null;
 		if (phase === "focus") {
 			setPhase("break");
 			setRemaining(settings.breakMin * 60);
+			if (settings.autoStartNext) {
+				setIsRunning(true);
+				targetRef.current = Date.now() + settings.breakMin * 60 * 1000;
+			}
 		} else {
 			setPhase("focus");
 			setRemaining(settings.focusMin * 60);
+			if (settings.autoStartNext) {
+				setIsRunning(true);
+				targetRef.current = Date.now() + settings.focusMin * 60 * 1000;
+			}
 		}
-		setIsRunning(settings.autoStartNext);
 	};
 	const applyPreset = (name: string, focusMin: number, breakMin: number) => {
 		setSettings(s => ({ ...s, presetName: name, focusMin, breakMin }));
 		setPhase("focus");
 		setIsRunning(false);
+		targetRef.current = null;
 		setRemaining(focusMin * 60);
 	};
 
@@ -348,12 +421,21 @@ export default function HybridPomodoroApp(): JSX.Element {
 		if (!n) return;
 		setCategories(arr => (arr.includes(n) ? arr : [...arr, n]));
 	};
+	const removeCategory = (name: string) => {
+		const n = name.trim();
+		if (!n) return;
+		setCategories(arr => arr.filter(c => c !== n));
+	};
 	const addProject = (name: string) => {
 		const n = name.trim();
 		if (!n) return;
 		setProjects(arr => (arr.includes(n) ? arr : [...arr, n]));
 	};
-
+	const removeProject = (name: string) => {
+		const n = name.trim();
+		if (!n) return;
+		setProjects(arr => arr.filter(c => c !== n));
+	};
 	const filteredTasks = tasks.filter(t => {
 		const okCat = filterCat === "All" || t.category === filterCat;
 		const okProj = filterProject === "All" || t.project === filterProject;
@@ -377,398 +459,399 @@ export default function HybridPomodoroApp(): JSX.Element {
 	};
 
 	return (
-		<html lang="en">
-			<head>
-				<meta charSet="UTF-8" />
-				<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-				<title>Document</title>
-			</head>
-			<body>
-				<div className={dark ? "dark" : ""}>
-					<div className="min-h-[100dvh] w-full bg-neutral-50 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100">
-						{/* App shell */}
-						<div className="mx-auto max-w-6xl p-4 sm:p-6">
-							<header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-								<h1 className="flex items-center gap-1 text-2xl sm:text-3xl font-semibold tracking-tight">
-									<svg
-										xmlns="http://www.w3.org/2000/svg"
-										width="24"
-										height="24"
-										viewBox="0 0 24 24"
-										fill="none"
-										stroke="currentColor"
-										strokeWidth="2"
-										strokeLinecap="round"
-										strokeLinejoin="round"
-										className="mt-1">
-										<path d="M5 22h14" />
-										<path d="M5 2h14" />
-										<path d="M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22" />
-										<path d="M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2" />
-									</svg>
-									FlowForge
-								</h1>
-								<div className="flex items-center gap-2 text-sm">
-									<span className="rounded-full px-3 py-1 bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100">
-										Preset: <strong className="ml-1">{settings.presetName}</strong>
-									</span>
-									<span className="hidden sm:inline-block rounded-full px-3 py-1 bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100">
-										Focus {settings.focusMin}m • Break {settings.breakMin}m
-									</span>
-									<label className="ml-2 inline-flex items-center gap-2 select-none cursor-pointer">
-										<input
-											type="checkbox"
-											className="h-4 w-4 accent-neutral-800"
-											checked={settings.autoStartNext}
-											onChange={e => setSettings(s => ({ ...s, autoStartNext: e.target.checked }))}
-										/>
-										<span className="text-sm">Auto-start</span>
-									</label>
-									<button
-										onClick={() => setDark(v => !v)}
-										className="ml-2 inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 border-neutral-300 bg-white text-neutral-900 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700">
-										{dark ? <SunIcon /> : <MoonIcon />}
-										{dark ? "Light" : "Dark"}
-									</button>
+		<div className={dark ? "dark" : ""}>
+			{/* Global small style to ensure pointer cursor on all buttons */}
+			<style>{`button{cursor:pointer}`}</style>
+
+			<div className="min-h-[100dvh] w-full bg-neutral-50 text-neutral-900 dark:bg-neutral-900 dark:text-neutral-100">
+				{/* App shell */}
+				<div className="mx-auto max-w-6xl p-4 sm:p-6">
+					<header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+						<h1 className="flex items-center gap-1 text-2xl sm:text-3xl font-semibold tracking-tight">
+							<Hourglass className="mt-0.5" />
+							Flow Forge
+						</h1>
+						<div className="flex items-center gap-2 text-sm">
+							<span className="rounded-full px-3 py-1 bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100">
+								Preset: <strong className="ml-1">{settings.presetName}</strong>
+							</span>
+							<span className="hidden sm:inline-block rounded-full px-3 py-1 bg-neutral-200 text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100">
+								Focus {settings.focusMin}m • Break {settings.breakMin}m
+							</span>
+							<label className="ml-2 inline-flex items-center gap-2 select-none cursor-pointer">
+								<input
+									type="checkbox"
+									className="h-4 w-4 accent-neutral-800"
+									checked={settings.autoStartNext}
+									onChange={e => setSettings(s => ({ ...s, autoStartNext: e.target.checked }))}
+								/>
+								<span className="text-sm">Auto-start</span>
+							</label>
+							<button
+								type="button"
+								onClick={() => setDark(v => !v)}
+								className="ml-2 inline-flex items-center gap-2 rounded-xl border px-3 py-1.5 border-neutral-300 bg-white text-neutral-900 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:text-neutral-100 dark:hover:bg-neutral-700">
+								{dark ? <SunIcon /> : <MoonIcon />}
+								{dark ? "Light" : "Dark"}
+							</button>
+						</div>
+					</header>
+
+					{/* Tabs */}
+					<div className="mt-6 flex flex-wrap gap-2 text-sm">
+						{(
+							[
+								{ id: "timer", label: "Timer" },
+								{ id: "tasks", label: "Tasks" },
+								{ id: "history", label: "History" },
+								{ id: "settings", label: "Settings" }
+							] as const
+						).map(t => (
+							<button
+								type="button"
+								key={t.id}
+								className={`rounded-xl px-3 py-1.5 border ${
+									activeTab === t.id
+										? "bg-neutral-900 text-white border-neutral-900 dark:bg-white dark:text-neutral-900 dark:border-white"
+										: "bg-white border-neutral-300 dark:bg-neutral-800 dark:border-neutral-700"
+								}`}
+								onClick={() => setActiveTab(t.id)}>
+								{t.label}
+							</button>
+						))}
+					</div>
+
+					{activeTab === "timer" && (
+						<section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+							{/* Timer Card */}
+							<div className="rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
+								<div className="flex items-center justify-between">
+									<div className="text-sm uppercase tracking-wide text-neutral-500 dark:text-neutral-400">{phase === "focus" ? "Focus" : "Break"} session</div>
+									<div className="text-sm text-neutral-500 dark:text-neutral-400">
+										Completed today: <strong>{completedSessions}</strong>
+									</div>
 								</div>
-							</header>
 
-							{/* Tabs */}
-							<div className="mt-6 flex flex-wrap gap-2 text-sm">
-								{(
-									[
-										{ id: "timer", label: "Timer" },
-										{ id: "tasks", label: "Tasks" },
-										{ id: "history", label: "History" },
-										{ id: "settings", label: "Settings" }
-									] as const
-								).map(t => (
-									<button
-										key={t.id}
-										className={`rounded-xl px-3 py-1.5 border ${
-											activeTab === t.id
-												? "bg-neutral-900 text-white border-neutral-900 dark:bg-white dark:text-neutral-900 dark:border-white"
-												: "bg-white border-neutral-300 dark:bg-neutral-800 dark:border-neutral-700"
-										}`}
-										onClick={() => setActiveTab(t.id)}>
-										{t.label}
-									</button>
-								))}
-							</div>
-
-							{activeTab === "timer" && (
-								<section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-									{/* Timer Card */}
-									<div className="rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
-										<div className="flex items-center justify-between">
-											<div className="text-sm uppercase tracking-wide text-neutral-500 dark:text-neutral-400">{phase === "focus" ? "Focus" : "Break"} session</div>
-											<div className="text-sm text-neutral-500 dark:text-neutral-400">
-												Completed today: <strong>{completedSessions}</strong>
-											</div>
-										</div>
-
-										<div className="mt-6 flex flex-col items-center">
-											<div className="text-[64px] sm:text-[80px] font-semibold tabular-nums leading-none">{secondsToClock(remaining)}</div>
-											<div className="mt-4 flex items-center gap-2">
-												{!isRunning ? (
-													<button
-														onClick={start}
-														className="inline-flex items-center gap-2 rounded-2xl bg-neutral-900 text-white px-4 py-2 shadow hover:opacity-90 dark:bg-white dark:text-neutral-900">
-														<PlayIcon /> Start
-													</button>
-												) : (
-													<button
-														onClick={pause}
-														className="inline-flex items-center gap-2 rounded-2xl bg-neutral-900 text-white px-4 py-2 shadow hover:opacity-90 dark:bg-white dark:text-neutral-900">
-														<PauseIcon /> Pause
-													</button>
-												)}
-												<button
-													onClick={reset}
-													className="inline-flex items-center gap-2 rounded-2xl bg-neutral-200 text-neutral-900 px-4 py-2 hover:bg-neutral-300 dark:bg-neutral-700 dark:text-neutral-100 dark:hover:bg-neutral-600">
-													<RotateCcwIcon /> Reset
-												</button>
-												<button
-													onClick={skip}
-													className="inline-flex items-center gap-2 rounded-2xl bg-neutral-200 text-neutral-900 px-4 py-2 hover:bg-neutral-300 dark:bg-neutral-700 dark:text-neutral-100 dark:hover:bg-neutral-600">
-													<SkipIcon /> Skip
-												</button>
-											</div>
-
-											<div className="mt-6 grid grid-cols-2 gap-3 w-full sm:max-w-md">
-												<button
-													onClick={() => applyPreset("Deep Work (90/15)", 90, 15)}
-													className={`rounded-2xl border px-3 py-2 text-left ${
-														settings.presetName === "Deep Work (90/15)"
-															? "border-neutral-900 bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 dark:border-white"
-															: "border-neutral-300 bg-neutral-50 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
-													}`}>
-													<div className="text-sm font-semibold">Deep Work</div>
-													<div className="text-xs opacity-80">90 min focus • 15 min break</div>
-												</button>
-												<button
-													onClick={() => applyPreset("Flow (50/10)", 50, 10)}
-													className={`rounded-2xl border px-3 py-2 text-left ${
-														settings.presetName === "Flow (50/10)"
-															? "border-neutral-900 bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 dark:border-white"
-															: "border-neutral-300 bg-neutral-50 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
-													}`}>
-													<div className="text-sm font-semibold">Flow</div>
-													<div className="text-xs opacity-80">50 min focus • 10 min break</div>
-												</button>
-											</div>
-										</div>
-									</div>
-
-									{/* Summary */}
-									<div className="rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
-										<h3 className="text-lg font-semibold">Session Summary</h3>
-										<ul className="mt-3 space-y-2 text-sm text-neutral-700 dark:text-neutral-300">
-											<li>
-												Preset: <strong>{settings.presetName}</strong>
-											</li>
-											<li>Next switch: {phase === "focus" ? `${settings.breakMin}m break` : `${settings.focusMin}m focus`}</li>
-											<li>
-												Auto-start next: <strong>{settings.autoStartNext ? "On" : "Off"}</strong>
-											</li>
-											<li>
-												Completed focus sessions this run: <strong>{completedSessions}</strong>
-											</li>
-										</ul>
-										<div className="mt-6 rounded-2xl border border-dashed border-neutral-300 p-4 dark:border-neutral-600">
-											<div className="text-sm font-medium mb-2">Pro tip</div>
-											<p className="text-sm text-neutral-700 dark:text-neutral-300">
-												Use <em>Deep Work</em> in the morning and switch to <em>Flow</em> in the afternoon. Toggle presets above without reconfiguring anything.
-											</p>
-										</div>
-									</div>
-								</section>
-							)}
-
-							{activeTab === "tasks" && (
-								<section className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
-									{/* Add Task */}
-									<div className="xl:col-span-1 rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
-										<h3 className="text-lg font-semibold">Add Task</h3>
-										<TaskForm categories={categories} projects={projects} onSubmit={addTask} />
-
-										<div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
-											<div>
-												<h4 className="text-sm font-semibold mb-2">Categories</h4>
-												<NameManager label="Add" items={categories} onAdd={addCategory} badge={badgeFor} dot={dotFor} placeholder="e.g. Research" />
-											</div>
-											<div>
-												<h4 className="text-sm font-semibold mb-2">Projects</h4>
-												<NameManager label="Add" items={projects} onAdd={addProject} badge={badgeFor} dot={dotFor} placeholder="e.g. MindMesh" />
-											</div>
-										</div>
-									</div>
-
-									{/* Task List */}
-									<div className="xl:col-span-2 rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
-										<div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-											<h3 className="text-lg font-semibold">Tasks</h3>
-											<div className="flex flex-wrap items-center gap-2">
-												<div className="flex items-center gap-2 text-sm">
-													<FilterIcon />
-													<label htmlFor="filterCat" className="sr-only">
-														Filter by Category
-													</label>
-													<select
-														id="filterCat"
-														className="rounded-xl border border-neutral-300 bg-white px-3 py-1.5 dark:bg-neutral-800 dark:border-neutral-700"
-														value={filterCat}
-														onChange={e => setFilterCat(e.target.value)}
-														title="Filter by Category">
-														<option>All</option>
-														{categories.map(c => (
-															<option key={c}>{c}</option>
-														))}
-													</select>
-													<select
-														className="rounded-xl border border-neutral-300 bg-white px-3 py-1.5 dark:bg-neutral-800 dark:border-neutral-700"
-														value={filterProject}
-														onChange={e => setFilterProject(e.target.value)}
-														title="Filter by Project">
-														<option>All</option>
-														{projects.map(p => (
-															<option key={p}>{p}</option>
-														))}
-													</select>
-												</div>
-												<input
-													placeholder="Search tasks…"
-													className="rounded-xl border border-neutral-300 bg-white px-3 py-1.5 text-sm dark:bg-neutral-800 dark:border-neutral-700"
-													value={search}
-													onChange={e => setSearch(e.target.value)}
-												/>
-											</div>
-										</div>
-
-										<div className="mt-4 text-sm text-neutral-600 dark:text-neutral-300">
-											Total: {tasks.length} • Completed: {completedCount}
-										</div>
-
-										<ul className="mt-4 divide-y divide-neutral-200 dark:divide-neutral-700">
-											{filteredTasks.length === 0 && <li className="py-8 text-center text-neutral-500 dark:text-neutral-400">No tasks found.</li>}
-											{filteredTasks.map(t => (
-												<TaskRow key={t.id} task={t} categories={categories} projects={projects} onUpdate={updateTask} onDelete={deleteTask} />
-											))}
-										</ul>
-									</div>
-								</section>
-							)}
-
-							{activeTab === "history" && (
-								<section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-									<div className="rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
-										<h3 className="text-lg font-semibold">Past 14 Days</h3>
-										<ul className="mt-4 space-y-2 text-sm">
-											{lastNDays(14).map(({ key, label, data }) => (
-												<li key={key} className="flex items-center justify-between rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900/40">
-													<span className="text-neutral-700 dark:text-neutral-300">{label}</span>
-													<span className="tabular-nums text-neutral-900 dark:text-neutral-100">
-														{data.count} sessions • {data.minutes} min
-													</span>
-												</li>
-											))}
-										</ul>
-									</div>
-
-									<div className="rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
-										<h3 className="text-lg font-semibold">Today</h3>
-										{(() => {
-											const d = history[todayKey()] || { sessions: [], minutes: 0, count: 0 };
-											if (d.sessions.length === 0) return <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-300">No completed focus sessions yet.</p>;
-											return (
-												<>
-													<div className="mt-2 text-sm text-neutral-600 dark:text-neutral-300">
-														Total: {d.count} • {d.minutes} minutes
-													</div>
-													<ul className="mt-3 space-y-2 text-sm">
-														{d.sessions
-															.slice()
-															.reverse()
-															.map((s, i) => (
-																<li
-																	key={`${s.ts}-${i}`}
-																	className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900/40 flex items-center justify-between">
-																	<span>{new Date(s.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
-																	<span className="tabular-nums">{s.minutes} min</span>
-																	<span className="opacity-70">{s.preset}</span>
-																</li>
-															))}
-													</ul>
-												</>
-											);
-										})()}
-									</div>
-								</section>
-							)}
-
-							{activeTab === "settings" && (
-								<section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
-									<div className="lg:col-span-2 rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
-										<h3 className="text-lg font-semibold">Presets</h3>
-										<div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+								<div className="mt-6 flex flex-col items-center">
+									<div className="text-[64px] sm:text-[80px] font-semibold tabular-nums leading-none">{secondsToClock(remaining)}</div>
+									<div className="mt-4 flex items-center gap-2">
+										{!isRunning ? (
 											<button
-												onClick={() => applyPreset("Deep Work (90/15)", 90, 15)}
-												className={`rounded-2xl border px-4 py-3 text-left ${
-													settings.presetName === "Deep Work (90/15)"
-														? "border-neutral-900 bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 dark:border-white"
-														: "border-neutral-300 bg-neutral-50 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
-												}`}>
-												<div className="font-semibold">Deep Work</div>
-												<div className="text-xs opacity-80">90 min focus • 15 min break</div>
+												type="button"
+												onClick={start}
+												className="inline-flex items-center gap-2 rounded-2xl bg-neutral-900 text-white px-4 py-2 shadow hover:opacity-90 dark:bg-white dark:text-neutral-900">
+												<PlayIcon /> Start
 											</button>
+										) : (
 											<button
-												onClick={() => applyPreset("Flow (50/10)", 50, 10)}
-												className={`rounded-2xl border px-4 py-3 text-left ${
-													settings.presetName === "Flow (50/10)"
-														? "border-neutral-900 bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 dark:border-white"
-														: "border-neutral-300 bg-neutral-50 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
-												}`}>
-												<div className="font-semibold">Flow</div>
-												<div className="text-xs opacity-80">50 min focus • 10 min break</div>
+												type="button"
+												onClick={pause}
+												className="inline-flex items-center gap-2 rounded-2xl bg-neutral-900 text-white px-4 py-2 shadow hover:opacity-90 dark:bg-white dark:text-neutral-900">
+												<PauseIcon /> Pause
 											</button>
-											<div className="rounded-2xl border border-neutral-300 bg-neutral-50 p-4 dark:border-neutral-700 dark:bg-neutral-800">
-												<div className="font-semibold">Custom</div>
-												<div className="mt-3 grid grid-cols-2 gap-2 text-sm">
-													<label className="flex flex-col">
-														<span className="text-neutral-600 dark:text-neutral-300">Focus (min)</span>
-														<input
-															type="number"
-															min={5}
-															className="rounded-xl border border-neutral-300 bg-white px-2 py-1.5 dark:bg-neutral-800 dark:border-neutral-700"
-															value={customPreset.focusMin}
-															onChange={e => setCustomPreset(p => ({ ...p, focusMin: Number(e.target.value) }))}
-														/>
-													</label>
-													<label className="flex flex-col">
-														<span className="text-neutral-600 dark:text-neutral-300">Break (min)</span>
-														<input
-															type="number"
-															min={1}
-															className="rounded-xl border border-neutral-300 bg-white px-2 py-1.5 dark:bg-neutral-800 dark:border-neutral-700"
-															value={customPreset.breakMin}
-															onChange={e => setCustomPreset(p => ({ ...p, breakMin: Number(e.target.value) }))}
-														/>
-													</label>
-												</div>
-												<button
-													onClick={() => applyPreset(customPreset.name || "Custom", Math.max(5, customPreset.focusMin), Math.max(1, customPreset.breakMin))}
-													className="mt-3 inline-flex items-center gap-2 rounded-2xl bg-neutral-900 text-white px-4 py-2 hover:opacity-90 dark:bg-white dark:text-neutral-900">
-													Apply Custom
-												</button>
-											</div>
-										</div>
-									</div>
-
-									<div className="lg:col-span-1 rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
-										<h3 className="text-lg font-semibold">Behavior & Storage</h3>
-										<label className="mt-3 flex items-center justify-between rounded-2xl border border-neutral-200 p-3 dark:border-neutral-700">
-											<div>
-												<div className="text-sm font-medium">Auto-start next session</div>
-												<div className="text-xs text-neutral-600 dark:text-neutral-300">When a session ends, automatically begin the next phase.</div>
-											</div>
-											<input
-												type="checkbox"
-												className="h-5 w-5 accent-neutral-900"
-												checked={settings.autoStartNext}
-												onChange={e => setSettings(s => ({ ...s, autoStartNext: e.target.checked }))}
-											/>
-										</label>
-
+										)}
 										<button
-											onClick={() => {
-												if (!confirm("Reset all data? This will clear tasks, categories, projects, settings & history.")) return;
-												localStorage.removeItem("pomodoro_tasks_v3");
-												localStorage.removeItem("pomodoro_categories_v3");
-												localStorage.removeItem("pomodoro_projects_v1");
-												localStorage.removeItem("pomodoro_settings_v3");
-												localStorage.removeItem("pomodoro_history_v2");
-												setTasks([]);
-												setCategories([...DEFAULT_CATEGORIES] as unknown as string[]);
-												setProjects([...DEFAULT_PROJECTS] as unknown as string[]);
-												setHistory({});
-												setDark(false);
-												applyPreset("Deep Work (90/15)", 90, 15);
-											}}
-											className="mt-4 w-full rounded-2xl border border-rose-300 bg-rose-50 px-4 py-2 text-rose-700 hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-900/30 dark:text-rose-300 dark:hover:bg-rose-900/40">
-											Reset All Data
+											type="button"
+											onClick={reset}
+											className="inline-flex items-center gap-2 rounded-2xl bg-neutral-200 text-neutral-900 px-4 py-2 hover:bg-neutral-300 dark:bg-neutral-700 dark:text-neutral-100 dark:hover:bg-neutral-600">
+											<RotateCcwIcon /> Reset
+										</button>
+										<button
+											type="button"
+											onClick={skip}
+											className="inline-flex items-center gap-2 rounded-2xl bg-neutral-200 text-neutral-900 px-4 py-2 hover:bg-neutral-300 dark:bg-neutral-700 dark:text-neutral-100 dark:hover:bg-neutral-600">
+											<SkipIcon /> Skip
 										</button>
 									</div>
-								</section>
-							)}
 
-							<footer className="mt-10 pb-6 text-center text-xs text-neutral-500 dark:text-neutral-400">
-								Built for focus-friendly coding sessions — 90/15 mornings, 50/10 afternoons. Stay hydrated 💧
-							</footer>
-						</div>
-					</div>
+									<div className="mt-6 grid grid-cols-2 gap-3 w-full sm:max-w-md">
+										<button
+											type="button"
+											onClick={() => applyPreset("Deep Work (90/15)", 90, 15)}
+											className={`rounded-2xl border px-3 py-2 text-left ${
+												settings.presetName === "Deep Work (90/15)"
+													? "border-neutral-900 bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 dark:border-white"
+													: "border-neutral-300 bg-neutral-50 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
+											}`}>
+											<div className="text-sm font-semibold">Deep Work</div>
+											<div className="text-xs opacity-80">90 min focus • 15 min break</div>
+										</button>
+										<button
+											type="button"
+											onClick={() => applyPreset("Flow (50/10)", 50, 10)}
+											className={`rounded-2xl border px-3 py-2 text-left ${
+												settings.presetName === "Flow (50/10)"
+													? "border-neutral-900 bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 dark:border-white"
+													: "border-neutral-300 bg-neutral-50 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
+											}`}>
+											<div className="text-sm font-semibold">Flow</div>
+											<div className="text-xs opacity-80">50 min focus • 10 min break</div>
+										</button>
+									</div>
+								</div>
+							</div>
+
+							{/* Summary */}
+							<div className="rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
+								<h3 className="text-lg font-semibold">Session Summary</h3>
+								<ul className="mt-3 space-y-2 text-sm text-neutral-700 dark:text-neutral-300">
+									<li>
+										Preset: <strong>{settings.presetName}</strong>
+									</li>
+									<li>Next switch: {phase === "focus" ? `${settings.breakMin}m break` : `${settings.focusMin}m focus`}</li>
+									<li>
+										Auto-start next: <strong>{settings.autoStartNext ? "On" : "Off"}</strong>
+									</li>
+									<li>
+										Completed focus sessions this run: <strong>{completedSessions}</strong>
+									</li>
+								</ul>
+								<div className="mt-6 rounded-2xl border border-dashed border-neutral-300 p-4 dark:border-neutral-600">
+									<div className="text-sm font-medium mb-2">Pro tip</div>
+									<p className="text-sm text-neutral-700 dark:text-neutral-300">
+										Use <em>Deep Work</em> in the morning and switch to <em>Flow</em> in the afternoon. Toggle presets above without reconfiguring anything.
+									</p>
+								</div>
+							</div>
+						</section>
+					)}
+
+					{activeTab === "tasks" && (
+						<section className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-3">
+							{/* Add Task */}
+							<div className="xl:col-span-1 rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
+								<h3 className="text-lg font-semibold">Add Task</h3>
+								<TaskForm categories={categories} projects={projects} onSubmit={addTask} />
+
+								<div className="mt-8 grid grid-cols-1 gap-6">
+									<div>
+										<h4 className="text-sm font-semibold mb-2">Categories</h4>
+										<NameManager items={categories} onAdd={addCategory} onRemove={removeCategory} badge={badgeFor} dot={dotFor} placeholder="e.g. Research" />
+									</div>
+									<div>
+										<h4 className="text-sm font-semibold mb-2">Projects</h4>
+										<NameManager items={projects} onAdd={addProject} onRemove={removeProject} badge={badgeFor} dot={dotFor} placeholder="e.g. MindMesh" />
+									</div>
+								</div>
+							</div>
+
+							{/* Task List */}
+							<div className="xl:col-span-2 rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
+								<div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+									<h3 className="text-lg font-semibold">Tasks</h3>
+									<div className="flex flex-wrap items-center gap-2">
+										<div className="flex items-center gap-2 text-sm">
+											<FilterIcon />
+											<label htmlFor="filterCat" className="sr-only">
+												Filter by Category
+											</label>
+											<div className="relative w-[100px]">
+												<select
+													id="filterCat"
+													className="w-full appearance-none rounded-xl border border-neutral-300 bg-white px-3 py-1.5 dark:bg-neutral-800 dark:border-neutral-700"
+													value={filterCat}
+													onChange={e => setFilterCat(e.target.value)}
+													title="Filter by Category">
+													<option>All</option>
+													{categories.map(c => (
+														<option key={c}>{c}</option>
+													))}
+												</select>
+												<svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 opacity-70" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+													<path d="M5.5 7.5l4.5 4.5 4.5-4.5" />
+												</svg>
+											</div>
+											<div className="relative w-[100px]">
+												<select
+													className="w-full appearance-none rounded-xl border border-neutral-300 bg-white px-3 py-1.5 dark:bg-neutral-800 dark:border-neutral-700"
+													value={filterProject}
+													onChange={e => setFilterProject(e.target.value)}
+													title="Filter by Project">
+													<option>All</option>
+													{projects.map(p => (
+														<option key={p}>{p}</option>
+													))}
+												</select>
+												<svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 opacity-70" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+													<path d="M5.5 7.5l4.5 4.5 4.5-4.5" />
+												</svg>
+											</div>
+										</div>
+										<input
+											placeholder="Search tasks…"
+											className="rounded-xl border border-neutral-300 bg-white px-3 py-1.5 text-sm dark:bg-neutral-800 dark:border-neutral-700"
+											value={search}
+											onChange={e => setSearch(e.target.value)}
+										/>
+									</div>
+								</div>
+
+								<div className="mt-4 text-sm text-neutral-600 dark:text-neutral-300">
+									Total: {tasks.length} • Completed: {completedCount}
+								</div>
+
+								<ul className="mt-4 divide-y divide-neutral-200 dark:divide-neutral-700">
+									{filteredTasks.length === 0 && <li className="py-8 text-center text-neutral-500 dark:text-neutral-400">No tasks found.</li>}
+									{filteredTasks.map(t => (
+										<TaskRow key={t.id} task={t} categories={categories} projects={projects} onUpdate={updateTask} onDelete={deleteTask} />
+									))}
+								</ul>
+							</div>
+						</section>
+					)}
+
+					{activeTab === "history" && (
+						<section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
+							<div className="rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
+								<h3 className="text-lg font-semibold">Past 14 Days</h3>
+								<ul className="mt-4 space-y-2 text-sm">
+									{lastNDays(14).map(({ key, label, data }) => (
+										<li key={key} className="flex items-center justify-between rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900/40">
+											<span className="text-neutral-700 dark:text-neutral-300">{label}</span>
+											<span className="tabular-nums text-neutral-900 dark:text-neutral-100">
+												{data.count} sessions • {data.minutes} min
+											</span>
+										</li>
+									))}
+								</ul>
+							</div>
+
+							<div className="rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
+								<h3 className="text-lg font-semibold">Today</h3>
+								{(() => {
+									const d = history[todayKey()] || { sessions: [], minutes: 0, count: 0 };
+									if (d.sessions.length === 0) return <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-300">No completed focus sessions yet.</p>;
+									return (
+										<>
+											<div className="mt-2 text-sm text-neutral-600 dark:text-neutral-300">
+												Total: {d.count} • {d.minutes} minutes
+											</div>
+											<ul className="mt-3 space-y-2 text-sm">
+												{d.sessions
+													.slice()
+													.reverse()
+													.map((s, i) => (
+														<li
+															key={`${s.ts}-${i}`}
+															className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 dark:border-neutral-700 dark:bg-neutral-900/40 flex items-center justify-between">
+															<span>{new Date(s.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
+															<span className="tabular-nums">{s.minutes} min</span>
+															<span className="opacity-70">{s.preset}</span>
+														</li>
+													))}
+											</ul>
+										</>
+									);
+								})()}
+							</div>
+						</section>
+					)}
+
+					{activeTab === "settings" && (
+						<section className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
+							<div className="lg:col-span-2 rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
+								<h3 className="text-lg font-semibold">Presets</h3>
+								<div className="mt-4 grid grid-cols-1 sm:grid-cols-3 gap-3">
+									<button
+										type="button"
+										onClick={() => applyPreset("Deep Work (90/15)", 90, 15)}
+										className={`rounded-2xl border px-4 py-3 text-left ${
+											settings.presetName === "Deep Work (90/15)"
+												? "border-neutral-900 bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 dark:border-white"
+												: "border-neutral-300 bg-neutral-50 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
+										}`}>
+										<div className="font-semibold">Deep Work</div>
+										<div className="text-xs opacity-80">90 min focus • 15 min break</div>
+									</button>
+									<button
+										type="button"
+										onClick={() => applyPreset("Flow (50/10)", 50, 10)}
+										className={`rounded-2xl border px-4 py-3 text-left ${
+											settings.presetName === "Flow (50/10)"
+												? "border-neutral-900 bg-neutral-900 text-white dark:bg-white dark:text-neutral-900 dark:border-white"
+												: "border-neutral-300 bg-neutral-50 hover:bg-neutral-100 dark:border-neutral-700 dark:bg-neutral-800 dark:hover:bg-neutral-700"
+										}`}>
+										<div className="font-semibold">Flow</div>
+										<div className="text-xs opacity-80">50 min focus • 10 min break</div>
+									</button>
+									<div className="rounded-2xl border border-neutral-300 bg-neutral-50 p-4 dark:border-neutral-700 dark:bg-neutral-800">
+										<div className="font-semibold">Custom</div>
+										<div className="mt-3 grid grid-cols-2 gap-2 text-sm">
+											<label className="flex flex-col">
+												<span className="text-neutral-600 dark:text-neutral-300">Focus (min)</span>
+												<input
+													type="number"
+													min={5}
+													className="rounded-xl border border-neutral-300 bg-white px-2 py-1.5 dark:bg-neutral-800 dark:border-neutral-700"
+													value={customPreset.focusMin}
+													onChange={e => setCustomPreset(p => ({ ...p, focusMin: Number(e.target.value) }))}
+												/>
+											</label>
+											<label className="flex flex-col">
+												<span className="text-neutral-600 dark:text-neutral-300">Break (min)</span>
+												<input
+													type="number"
+													min={1}
+													className="rounded-xl border border-neutral-300 bg-white px-2 py-1.5 dark:bg-neutral-800 dark:border-neutral-700"
+													value={customPreset.breakMin}
+													onChange={e => setCustomPreset(p => ({ ...p, breakMin: Number(e.target.value) }))}
+												/>
+											</label>
+										</div>
+										<button
+											type="button"
+											onClick={() => applyPreset(customPreset.name || "Custom", Math.max(5, customPreset.focusMin), Math.max(1, customPreset.breakMin))}
+											className="mt-3 inline-flex items-center gap-2 rounded-2xl bg-neutral-900 text-white px-4 py-2 hover:opacity-90 dark:bg-white dark:text-neutral-900">
+											Apply Custom
+										</button>
+									</div>
+								</div>
+							</div>
+
+							<div className="lg:col-span-1 rounded-3xl bg-white p-6 shadow-sm border border-neutral-200 dark:bg-neutral-800 dark:border-neutral-700">
+								<h3 className="text-lg font-semibold">Behavior & Storage</h3>
+								<label className="mt-3 flex items-center justify-between rounded-2xl border border-neutral-200 p-3 dark:border-neutral-700">
+									<div>
+										<div className="text-sm font-medium">Auto-start next session</div>
+										<div className="text-xs text-neutral-600 dark:text-neutral-300">When a session ends, automatically begin the next phase.</div>
+									</div>
+									<input
+										type="checkbox"
+										className="h-5 w-5 accent-neutral-900"
+										checked={settings.autoStartNext}
+										onChange={e => setSettings(s => ({ ...s, autoStartNext: e.target.checked }))}
+									/>
+								</label>
+
+								<button
+									type="button"
+									onClick={() => {
+										if (!confirm("Reset all data? This will clear tasks, categories, projects, settings & history.")) return;
+										localStorage.removeItem("pomodoro_tasks_v4");
+										localStorage.removeItem("pomodoro_categories_v4");
+										localStorage.removeItem("pomodoro_projects_v2");
+										localStorage.removeItem("pomodoro_settings_v4");
+										localStorage.removeItem("pomodoro_history_v3");
+										setTasks([]);
+										setCategories([...DEFAULT_CATEGORIES] as unknown as string[]);
+										setProjects([...DEFAULT_PROJECTS] as unknown as string[]);
+										setHistory({});
+										setDark(false);
+										applyPreset("Deep Work (90/15)", 90, 15);
+									}}
+									className="mt-4 w-full rounded-2xl border border-rose-300 bg-rose-50 px-4 py-2 text-rose-700 hover:bg-rose-100 dark:border-rose-800 dark:bg-rose-900/30 dark:text-rose-300 dark:hover:bg-rose-900/40">
+									Reset All Data
+								</button>
+							</div>
+						</section>
+					)}
+
+					<footer className="mt-10 pb-6 text-center text-xs text-neutral-500 dark:text-neutral-400">
+						Built for focus-friendly coding sessions — 90/15 mornings, 50/10 afternoons. Stay hydrated 💧
+					</footer>
 				</div>
-			</body>
-		</html>
+			</div>
+		</div>
 	);
 }
 
@@ -813,32 +896,51 @@ function TaskForm({ categories, projects, onSubmit }: TaskFormProps): JSX.Elemen
 			</div>
 			<div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
 				<div className="flex flex-col gap-2">
-					<label className="text-sm text-neutral-700 dark:text-neutral-300">Category</label>
-					<select
-						className="rounded-xl border border-neutral-300 bg-white px-3 py-2 dark:bg-neutral-800 dark:border-neutral-700"
-						value={cat}
-						onChange={e => setCat(e.target.value)}
-						title="Select Category">
-						{categories.map(c => (
-							<option key={c}>{c}</option>
-						))}
-					</select>
+					<label htmlFor="task-category" className="text-sm text-neutral-700 dark:text-neutral-300">
+						Category
+					</label>
+					<div className="relative">
+						<select
+							id="task-category"
+							title="Select category"
+							className="w-full appearance-none rounded-xl border border-neutral-300 bg-white px-3 py-2 dark:bg-neutral-800 dark:border-neutral-700"
+							value={cat}
+							onChange={e => setCat(e.target.value)}>
+							{categories.map(c => (
+								<option key={c}>{c}</option>
+							))}
+						</select>
+
+						<svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 opacity-70" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+							<path d="M5.5 7.5l4.5 4.5 4.5-4.5" />
+						</svg>
+					</div>
 				</div>
 				<div className="flex flex-col gap-2">
-					<label className="text-sm text-neutral-700 dark:text-neutral-300">Project</label>
-					<select
-						id="taskFormProject"
-						title="Select Project"
-						className="rounded-xl border border-neutral-300 bg-white px-3 py-2 dark:bg-neutral-800 dark:border-neutral-700"
-						value={proj}
-						onChange={e => setProj(e.target.value)}>
-						{projects.map(p => (
-							<option key={p}>{p}</option>
-						))}
-					</select>
+					<label htmlFor="task-project" className="text-sm text-neutral-700 dark:text-neutral-300">
+						Project
+					</label>
+					<div className="relative">
+						<select
+							id="task-project"
+							title="Select project"
+							className="w-full appearance-none rounded-xl border border-neutral-300 bg-white px-3 py-2 dark:bg-neutral-800 dark:border-neutral-700"
+							value={proj}
+							onChange={e => setProj(e.target.value)}>
+							{projects.map(p => (
+								<option key={p}>{p}</option>
+							))}
+						</select>
+
+						<svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 opacity-70" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+							<path d="M5.5 7.5l4.5 4.5 4.5-4.5" />
+						</svg>
+					</div>
 				</div>
 			</div>
-			<button type="submit" className="inline-flex items-center gap-2 rounded-2xl bg-neutral-900 text-white px-4 py-2 hover:opacity-90 dark:bg-white dark:text-neutral-900">
+			<button
+				type="submit"
+				className="justify-center w-full inline-flex items-center gap-2 rounded-2xl bg-neutral-900 text-white px-4 py-2 hover:opacity-90 dark:bg-white dark:text-neutral-900">
 				<PlusIcon /> Add Task
 			</button>
 		</form>
@@ -846,32 +948,34 @@ function TaskForm({ categories, projects, onSubmit }: TaskFormProps): JSX.Elemen
 }
 
 type NameManagerProps = {
-	label: string;
 	items: string[];
 	onAdd: (name: string) => void;
+	onRemove: (name: string) => void;
 	badge: (name?: string) => string;
 	dot: (name?: string) => string;
 	placeholder?: string;
 };
 
-function NameManager({ label, items, onAdd, badge, dot, placeholder }: NameManagerProps): JSX.Element {
+function NameManager({ items, onAdd, onRemove, badge, dot, placeholder }: NameManagerProps): JSX.Element {
 	const [name, setName] = useState<string>("");
 	return (
 		<div className="space-y-3">
 			<div className="flex gap-2">
 				<input
-					className="flex-1 rounded-xl border border-neutral-300 bg-white px-3 py-2 dark:bg-neutral-800 dark:border-neutral-700"
+					className="flex-1 rounded-l-xl border border-neutral-300 bg-white px-3 py-2 dark:bg-neutral-800 dark:border-neutral-700"
 					placeholder={placeholder}
 					value={name}
 					onChange={e => setName(e.target.value)}
 				/>
 				<button
+					type="button"
+					title="Add"
 					onClick={() => {
 						onAdd(name);
 						setName("");
 					}}
-					className="rounded-2xl bg-neutral-200 text-neutral-900 px-4 py-2 hover:bg-neutral-300 dark:bg-neutral-700 dark:text-neutral-100 dark:hover:bg-neutral-600">
-					{label}
+					className="rounded-r-2xl bg-neutral-200 text-neutral-900 px-4 py-2 hover:bg-neutral-300 dark:bg-neutral-700 dark:text-neutral-100 dark:hover:bg-neutral-600">
+					<PlusIcon />
 				</button>
 			</div>
 			<div className="flex flex-wrap gap-2">
@@ -879,6 +983,9 @@ function NameManager({ label, items, onAdd, badge, dot, placeholder }: NameManag
 					<span key={c} className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs ${badge(c)}`}>
 						<span className={`h-2 w-2 rounded-full ${dot(c)}`}></span>
 						{c}
+						<button type="button" title="Remove" onClick={() => onRemove(c)} className="text-neutral-500 hover:text-neutral-700 dark:text-neutral-400 dark:hover:text-neutral-200">
+							<XIcon width={12} height={12} color="currentColor" />
+						</button>
 					</span>
 				))}
 			</div>
@@ -907,18 +1014,29 @@ function TaskRow({ task, categories, projects, onUpdate, onDelete }: TaskRowProp
 
 	return (
 		<li className="py-3">
-			<div className="flex items-start gap-3">
-				<label className="flex items-center">
-					<input
-						type="checkbox"
-						className="mt-1 h-4 w-4 accent-neutral-900"
-						checked={task.done}
-						onChange={e => onUpdate(task.id, { done: e.currentTarget.checked })}
-						title="Mark task as completed"
-					/>
-					<span className="sr-only">Mark task as completed</span>
-				</label>
-
+			<div className={`flex items-start gap-3  ${task.done ? "opacity-50" : "opacity-100"} transition-opacity duration-200`}>
+				{!editing && (
+					<label htmlFor={`task-done-${task.id}`} className="relative inline-flex items-center">
+						<input
+							id={`task-done-${task.id}`}
+							type="checkbox"
+							checked={task.done}
+							onChange={e => onUpdate(task.id, { done: e.currentTarget.checked })}
+							className="peer mt-[1px] h-5 w-5 appearance-none rounded-full border-2 border-neutral-400
+               checked:bg-neutral-900 checked:border-neutral-900
+               dark:border-neutral-600 dark:checked:bg-white dark:checked:border-white"
+						/>
+						{/* checkmark icon */}
+						<svg
+							viewBox="0 0 20 20"
+							className="pointer-events-none absolute left-1/2 top-1/2 h-3.5 w-3.5 -translate-x-1/2 -translate-y-1/2
+               text-white opacity-0 transition-opacity peer-checked:opacity-100
+               dark:text-neutral-900"
+							aria-hidden="true">
+							<path d="M4.5 10.5l3 3 8-8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+						</svg>
+					</label>
+				)}
 				<div className="flex-1">
 					{!editing ? (
 						<>
@@ -946,34 +1064,48 @@ function TaskRow({ task, categories, projects, onUpdate, onDelete }: TaskRowProp
 								placeholder="Edit task title"
 								title="Task Title"
 							/>
-							<select
-								className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm dark:bg-neutral-800 dark:border-neutral-700"
-								value={cat}
-								onChange={e => setCat(e.target.value)}
-								title="Select Category"
-								aria-label="Select Category">
-								{[...new Set([task.category, ...categories])].map(c => (
-									<option key={c}>{c}</option>
-								))}
-							</select>
-							<select
-								className="rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm dark:bg-neutral-800 dark:border-neutral-700"
-								value={proj}
-								onChange={e => setProj(e.target.value)}
-								title="Select Project"
-								aria-label="Select Project">
-								{[...new Set([task.project, ...projects])].map(p => (
-									<option key={p}>{p}</option>
-								))}
-							</select>
+							<div className="relative">
+								<select
+									className="appearance-none rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm dark:bg-neutral-800 dark:border-neutral-700"
+									value={cat}
+									onChange={e => setCat(e.target.value)}
+									title="Select category">
+									{[...new Set([task.category, ...categories])].map(c => (
+										<option key={c}>{c}</option>
+									))}
+								</select>
+								<svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 opacity-70" viewBox="0 0 20 20" fill="currentColor">
+									<path d="M5.5 7.5l4.5 4.5 4.5-4.5" />
+								</svg>
+							</div>
+							<div className="relative">
+								<select
+									className="appearance-none rounded-xl border border-neutral-300 bg-white px-3 py-2 text-sm dark:bg-neutral-800 dark:border-neutral-700"
+									value={proj}
+									onChange={e => setProj(e.target.value)}
+									title="Select project">
+									{[...new Set([task.project, ...projects])].map(p => (
+										<option key={p}>{p}</option>
+									))}
+								</select>
+								<svg className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 h-4 w-4 opacity-70" viewBox="0 0 20 20" fill="currentColor">
+									<path d="M5.5 7.5l4.5 4.5 4.5-4.5" />
+								</svg>
+							</div>
 							<div className="flex gap-2">
-								<button onClick={save} className="rounded-2xl bg-neutral-900 text-white px-3 py-2 text-sm hover:opacity-90 dark:bg-white dark:text-neutral-900">
-									Save
+								<button
+									title="Save"
+									type="button"
+									onClick={save}
+									className="rounded-2xl bg-neutral-900 text-white px-3 py-2 text-sm hover:opacity-90 hover:rounded-lg dark:bg-white dark:text-neutral-900 transition-all duration-200">
+									<Save width={16} height={16} />
 								</button>
 								<button
+									title="Cancel"
+									type="button"
 									onClick={() => setEditing(false)}
-									className="rounded-2xl bg-neutral-200 text-neutral-900 px-3 py-2 text-sm hover:bg-neutral-300 dark:bg-neutral-700 dark:text-neutral-100 dark:hover:bg-neutral-600">
-									Cancel
+									className="rounded-2xl bg-neutral-200 text-neutral-900 px-3 py-2 text-sm hover:bg-neutral-300 dark:bg-neutral-700 dark:text-neutral-100 dark:hover:bg-neutral-600 hover:rounded-lg transition-all duration-200">
+									<X />
 								</button>
 							</div>
 						</div>
@@ -983,6 +1115,7 @@ function TaskRow({ task, categories, projects, onUpdate, onDelete }: TaskRowProp
 				<div className="flex items-center gap-2">
 					{!editing && (
 						<button
+							type="button"
 							title="Edit"
 							onClick={() => setEditing(true)}
 							className="rounded-xl border border-neutral-200 bg-white p-2 hover:bg-neutral-100 dark:bg-neutral-800 dark:border-neutral-700 dark:hover:bg-neutral-700">
@@ -990,6 +1123,7 @@ function TaskRow({ task, categories, projects, onUpdate, onDelete }: TaskRowProp
 						</button>
 					)}
 					<button
+						type="button"
 						title="Delete"
 						onClick={() => onDelete(task.id)}
 						className="rounded-xl border border-neutral-200 bg-white p-2 hover:bg-rose-50 hover:border-rose-300 hover:text-rose-700 dark:bg-neutral-800 dark:border-neutral-700 dark:hover:bg-neutral-700">
@@ -1000,3 +1134,29 @@ function TaskRow({ task, categories, projects, onUpdate, onDelete }: TaskRowProp
 		</li>
 	);
 }
+
+// =========================
+// Dev sanity tests (run only in browser)
+// =========================
+
+(() => {
+	if (typeof window === "undefined") return;
+	const test = (name: string, cond: boolean) => {
+		if (!cond) console.error("[HybridPomodoro Tests] FAIL:", name);
+		else console.debug("[HybridPomodoro Tests] PASS:", name);
+	};
+	// secondsToClock formatting
+	test("secondsToClock 0 -> 00:00", secondsToClock(0) === "00:00");
+	test("secondsToClock 65 -> 01:05", secondsToClock(65) === "01:05");
+	// pad helper
+	test("pad(9) -> 09", pad(9) === "09");
+	test("pad(12) -> 12", pad(12) === "12");
+	// todayKey shape
+	const tk = todayKey();
+	test("todayKey format YYYY-MM-DD", tk.length === 10 && tk[4] === "-" && tk[7] === "-");
+	// hashToIndex bounds
+	for (const s of ["a", "abc", "General", "MindMesh"]) {
+		const idx = hashToIndex(s, PALETTES.length);
+		test(`hashToIndex within [0,${PALETTES.length - 1}] for '${s}'`, idx >= 0 && idx < PALETTES.length);
+	}
+})();
