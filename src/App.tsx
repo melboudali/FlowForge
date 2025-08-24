@@ -250,7 +250,7 @@ export default function HybridPomodoroApp(): JSX.Element {
 			setRemaining((phase === "focus" ? settings.focusMin : settings.breakMin) * 60);
 		}
 		// Intentionally exclude `isRunning` from deps so pausing doesn't reset remaining
-	}, [settings.focusMin, settings.breakMin, phase, isRunning]);
+	}, [settings.focusMin, settings.breakMin, phase]);
 
 	// Monotonic timer engine (no drift, resilient to throttling)
 	useEffect(() => {
